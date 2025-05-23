@@ -1,0 +1,198 @@
+
+
+```bash
+#!/bin/bash
+
+# Script to install Qualys agent on multiple Linux VMs
+# Usage: ./install_qualys_linux.sh -a ACTIVATION_ID -c CUSTOMER_ID -f VM_LIST_FILE [-u USERNAME] [-p PASSWORD]
+
+# Default values
+VM_LIST=""
+ACTIVATION_ID=""
+CUSTOMER_ID=""
+USERNAME=""
+PASSWORD=""
+SSH_KEY=""
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 -a ACTIVATION_ID -c CUSTOMER_ID -f VM_LIST_FILE [-u USERNAME] [-p PASSWORD] [-k SSH_KEY]"
+    echo "Options:"
+    echo "  -a ACTIVATION_ID    Qualys activation ID"
+    echo "  -c CUSTOMER_ID      Qualys customer ID"
+    echo "  -f VM_LIST_FILE     File containing list of VM hostnames/IPs"
+    echo "  -u USERNAME         SSH username (optional)"
+    echo "  -p PASSWORD         SSH password (optional)"
+    echo "  -k SSH_KEY          Path to SSH private key (optional)"
+    exit 1
+}
+
+# Parse command line arguments
+while getopts "a:c:f:u:p:k:h" opt; do
+    case $opt in
+        a) ACTIVATION_ID="$OPTARG";;
+        c) CUSTOMER_ID="$OPTARG";;
+        f) VM_LIST="$OPTARG";;
+        u) USERNAME="$OPTARG";;
+        p) PASSWORD="$OPTARG";;
+        k) SSH_KEY="$OPTARG";;
+        h) usage;;
+        ?) usage;;
+    esac
+done
+
+# Check required parameters
+if [ -z "$ACTIVATION_ID" ] || [ -z "$CUSTOMER_ID" ] || [ -z "$VM_LIST" ]; then
+    echo "Error: Missing required parameters"
+    usage
+fi
+
+# Function to install Qualys agent on a single VM
+install_qualys_agent() {
+    local host=$1
+    local activation_id=$2
+    local customer_id=$3
+    local username=$4
+    local password=$5
+    local ssh_key=$6
+
+    echo "Installing Qualys agent on $host..."
+
+    # Prepare SSH command
+    local ssh_cmd="ssh"
+    if [ ! -z "$username" ]; then
+        ssh_cmd="$ssh_cmd -l $username"
+    fi
+    if [ ! -z "$ssh_key" ]; then
+        ssh_cmd="$ssh_cmd -i $ssh_key"
+    fi
+    ssh_cmd="$ssh_cmd -o StrictHostKeyChecking=no"
+
+    # Prepare installation commands
+    local install_commands="
+        # Detect OS and package manager
+        if command -v apt-get &> /dev/null; then
+            # Debian/Ubuntu
+            sudo apt-get update
+            sudo apt-get install -y curl
+            sudo curl -o /tmp/qualys-cloud-agent.deb https://qualysguard.qualys.com/qweb/linux/qualys-cloud-agent.deb
+            sudo dpkg -i /tmp/qualys-cloud-agent.deb
+            sudo /usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh activation_id=$activation_id customer_id=$customer_id
+        elif command -v yum &> /dev/null; then
+            # RHEL/CentOS
+            sudo yum install -y curl
+            sudo curl -o /tmp/qualys-cloud-agent.rpm https://qualysguard.qualys.com/qweb/linux/qualys-cloud-agent.rpm
+            sudo rpm -i /tmp/qualys-cloud-agent.rpm
+            sudo /usr/local/qualys/cloud-agent/bin/qualys-cloud-agent.sh activation_id=$activation_id customer_id=$customer_id
+        else
+            echo 'Unsupported Linux distribution'
+            exit 1
+        fi
+
+        # Verify installation
+        if systemctl is-active --quiet qualys-cloud-agent; then
+            echo 'Qualys agent installed and running successfully'
+        else
+            echo 'Qualys agent installation may have failed'
+            exit 1
+        fi
+    "
+
+    # Execute installation
+    if [ ! -z "$password" ]; then
+        # Use sshpass if password is provided
+        if ! command -v sshpass &> /dev/null; then
+            echo "Error: sshpass is required for password authentication. Please install it first."
+            exit 1
+        fi
+        sshpass -p "$password" $ssh_cmd "$host" "$install_commands"
+    else
+        $ssh_cmd "$host" "$install_commands"
+    fi
+
+    # Check installation status
+    if [ $? -eq 0 ]; then
+        echo "Successfully installed Qualys agent on $host"
+    else
+        echo "Failed to install Qualys agent on $host"
+    fi
+}
+
+# Main script execution
+echo "Starting Qualys agent installation..."
+
+# Read VM list
+if [ ! -f "$VM_LIST" ]; then
+    echo "Error: VM list file not found: $VM_LIST"
+    exit 1
+fi
+
+# Process each VM
+while IFS= read -r host || [ -n "$host" ]; do
+    # Skip empty lines and comments
+    [[ -z "$host" || "$host" =~ ^[[:space:]]*# ]] && continue
+    
+    # Trim whitespace
+    host=$(echo "$host" | xargs)
+    
+    echo "Processing host: $host"
+    
+    # Check if host is reachable
+    if ping -c 1 -W 5 "$host" &> /dev/null; then
+        install_qualys_agent "$host" "$ACTIVATION_ID" "$CUSTOMER_ID" "$USERNAME" "$PASSWORD" "$SSH_KEY"
+    else
+        echo "Warning: Host $host is not reachable"
+    fi
+done < "$VM_LIST"
+
+echo "Installation process completed"
+```
+
+To use this script:
+
+1. Save it as `install_qualys_linux.sh`
+
+2. Make it executable:
+```bash
+chmod +x install_qualys_linux.sh
+```
+
+3. Create a text file (e.g., `linux_vms.txt`) containing your Linux VMs, one per line:
+```
+vm1.example.com
+vm2.example.com
+192.168.1.100
+```
+
+4. Run the script with the required parameters:
+```bash
+./install_qualys_linux.sh -a YOUR_ACTIVATION_ID -c YOUR_CUSTOMER_ID -f linux_vms.txt
+```
+
+Optional parameters:
+- `-u USERNAME`: SSH username for remote access
+- `-p PASSWORD`: SSH password for remote access
+- `-k SSH_KEY`: Path to SSH private key for authentication
+
+Features of this script:
+1. Supports both Debian/Ubuntu (apt) and RHEL/CentOS (yum) based systems
+2. Automatically detects the package manager and uses the appropriate installation method
+3. Supports multiple authentication methods (password or SSH key)
+4. Includes error handling and logging
+5. Verifies VM connectivity before attempting installation
+6. Checks if the agent is running after installation
+7. Downloads the latest Qualys agent package automatically
+
+Important notes:
+1. You'll need your Qualys Activation ID and Customer ID from your Qualys account
+2. The script requires:
+   - SSH access to target VMs
+   - Sudo privileges on target VMs
+   - `curl` package (will be installed if not present)
+   - `sshpass` if using password authentication
+3. For security best practices:
+   - Prefer using SSH keys over passwords
+   - Ensure the script and VM list file have appropriate permissions
+   - Consider using a dedicated service account with limited privileges
+
+Would you like me to modify the script for any specific requirements or add additional features?
