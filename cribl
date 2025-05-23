@@ -1,0 +1,260 @@
+
+```bash
+#!/bin/bash
+
+# Script to install Cribl agent on multiple AWS Linux VMs
+# Usage: ./install_cribl_aws.sh -f INSTANCE_LIST -r AWS_REGION -p CRIBL_PACKAGE_URL [-u SSH_USER] [-k SSH_KEY]
+
+# Default values
+INSTANCE_LIST=""
+AWS_REGION=""
+CRIBL_PACKAGE_URL=""
+SSH_USER="ec2-user"  # Default AWS Linux user
+SSH_KEY=""
+CRIBL_CONFIG_PATH="/opt/cribl/config"
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 -f INSTANCE_LIST -r AWS_REGION -p CRIBL_PACKAGE_URL [-u SSH_USER] [-k SSH_KEY]"
+    echo "Options:"
+    echo "  -f INSTANCE_LIST    File containing AWS instance IDs"
+    echo "  -r AWS_REGION       AWS region (e.g., us-west-2)"
+    echo "  -p PACKAGE_URL      Cribl package URL"
+    echo "  -u SSH_USER         SSH username (default: ec2-user)"
+    echo "  -k SSH_KEY          Path to SSH private key"
+    exit 1
+}
+
+# Parse command line arguments
+while getopts "f:r:p:u:k:h" opt; do
+    case $opt in
+        f) INSTANCE_LIST="$OPTARG";;
+        r) AWS_REGION="$OPTARG";;
+        p) CRIBL_PACKAGE_URL="$OPTARG";;
+        u) SSH_USER="$OPTARG";;
+        k) SSH_KEY="$OPTARG";;
+        h) usage;;
+        ?) usage;;
+    esac
+done
+
+# Check required parameters
+if [ -z "$INSTANCE_LIST" ] || [ -z "$AWS_REGION" ] || [ -z "$CRIBL_PACKAGE_URL" ]; then
+    echo "Error: Missing required parameters"
+    usage
+fi
+
+# Check if AWS CLI is installed
+if ! command -v aws &> /dev/null; then
+    echo "Error: AWS CLI is not installed. Please install it first."
+    exit 1
+fi
+
+# Function to get instance public IP
+get_instance_ip() {
+    local instance_id=$1
+    aws ec2 describe-instances \
+        --instance-ids "$instance_id" \
+        --region "$AWS_REGION" \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+        --output text
+}
+
+# Function to install Cribl agent on a single instance
+install_cribl_agent() {
+    local instance_id=$1
+    local package_url=$2
+    local ssh_user=$3
+    local ssh_key=$4
+
+    echo "Installing Cribl agent on instance $instance_id..."
+
+    # Get instance public IP
+    local instance_ip=$(get_instance_ip "$instance_id")
+    if [ -z "$instance_ip" ] || [ "$instance_ip" == "None" ]; then
+        echo "Error: Could not get public IP for instance $instance_id"
+        return 1
+    fi
+
+    # Prepare SSH command
+    local ssh_cmd="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    if [ ! -z "$ssh_key" ]; then
+        ssh_cmd="$ssh_cmd -i $ssh_key"
+    fi
+    ssh_cmd="$ssh_cmd $ssh_user@$instance_ip"
+
+    # Prepare installation commands
+    local install_commands="
+        # Create temporary directory
+        sudo mkdir -p /tmp/cribl_install
+        cd /tmp/cribl_install
+
+        # Download Cribl package
+        sudo curl -L -o cribl.tar.gz $package_url
+
+        # Extract package
+        sudo tar xzf cribl.tar.gz
+
+        # Install dependencies
+        if command -v apt-get &> /dev/null; then
+            # Debian/Ubuntu
+            sudo apt-get update
+            sudo apt-get install -y libcap2-bin
+        elif command -v yum &> /dev/null; then
+            # RHEL/CentOS/Amazon Linux
+            sudo yum install -y libcap
+        fi
+
+        # Move Cribl to /opt
+        sudo mv cribl /opt/
+
+        # Set up Cribl user and permissions
+        sudo useradd -r -s /bin/false cribl
+        sudo chown -R cribl:cribl /opt/cribl
+
+        # Create necessary directories
+        sudo mkdir -p $CRIBL_CONFIG_PATH
+        sudo chown -R cribl:cribl $CRIBL_CONFIG_PATH
+
+        # Set up systemd service
+        sudo tee /etc/systemd/system/cribl.service << EOF
+[Unit]
+Description=Cribl Stream
+After=network.target
+
+[Service]
+Type=simple
+User=cribl
+Group=cribl
+WorkingDirectory=/opt/cribl
+ExecStart=/opt/cribl/bin/cribl start
+ExecStop=/opt/cribl/bin/cribl stop
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        # Reload systemd and enable service
+        sudo systemctl daemon-reload
+        sudo systemctl enable cribl
+        sudo systemctl start cribl
+
+        # Clean up
+        cd /tmp
+        sudo rm -rf /tmp/cribl_install
+
+        # Verify installation
+        if systemctl is-active --quiet cribl; then
+            echo 'Cribl agent installed and running successfully'
+        else
+            echo 'Cribl agent installation may have failed'
+            exit 1
+        fi
+    "
+
+    # Execute installation
+    $ssh_cmd "$install_commands"
+
+    # Check installation status
+    if [ $? -eq 0 ]; then
+        echo "Successfully installed Cribl agent on instance $instance_id"
+    else
+        echo "Failed to install Cribl agent on instance $instance_id"
+    fi
+}
+
+# Main script execution
+echo "Starting Cribl agent installation..."
+
+# Read instance list
+if [ ! -f "$INSTANCE_LIST" ]; then
+    echo "Error: Instance list file not found: $INSTANCE_LIST"
+    exit 1
+fi
+
+# Process each instance
+while IFS= read -r instance_id || [ -n "$instance_id" ]; do
+    # Skip empty lines and comments
+    [[ -z "$instance_id" || "$instance_id" =~ ^[[:space:]]*# ]] && continue
+    
+    # Trim whitespace
+    instance_id=$(echo "$instance_id" | xargs)
+    
+    echo "Processing instance: $instance_id"
+    
+    # Check if instance exists and is running
+    instance_state=$(aws ec2 describe-instances \
+        --instance-ids "$instance_id" \
+        --region "$AWS_REGION" \
+        --query 'Reservations[0].Instances[0].State.Name' \
+        --output text)
+    
+    if [ "$instance_state" == "running" ]; then
+        install_cribl_agent "$instance_id" "$CRIBL_PACKAGE_URL" "$SSH_USER" "$SSH_KEY"
+    else
+        echo "Warning: Instance $instance_id is not running (state: $instance_state)"
+    fi
+done < "$INSTANCE_LIST"
+
+echo "Installation process completed"
+```
+
+To use this script:
+
+1. Save it as `install_cribl_aws.sh`
+
+2. Make it executable:
+```bash
+chmod +x install_cribl_aws.sh
+```
+
+3. Create a text file (e.g., `aws_instances.txt`) containing your AWS instance IDs, one per line:
+```
+i-1234567890abcdef0
+i-0987654321fedcba0
+```
+
+4. Run the script with the required parameters:
+```bash
+./install_cribl_aws.sh -f aws_instances.txt -r us-west-2 -p https://your-cribl-package-url.tar.gz
+```
+
+Optional parameters:
+- `-u SSH_USER`: SSH username (default: ec2-user)
+- `-k SSH_KEY`: Path to SSH private key
+
+Features of this script:
+1. Supports both Debian/Ubuntu and RHEL/CentOS/Amazon Linux systems
+2. Uses AWS CLI to get instance information
+3. Automatically detects the package manager and installs required dependencies
+4. Sets up proper systemd service for Cribl
+5. Creates dedicated Cribl user with appropriate permissions
+6. Includes error handling and logging
+7. Verifies instance state before attempting installation
+8. Checks if the agent is running after installation
+
+Prerequisites:
+1. AWS CLI installed and configured with appropriate credentials
+2. SSH access to target instances
+3. Sudo privileges on target instances
+4. Cribl package URL (you'll need to get this from your Cribl deployment)
+
+Important notes:
+1. The script assumes:
+   - Instances are running and accessible
+   - Security groups allow SSH access
+   - Instances have internet access to download the Cribl package
+2. For security best practices:
+   - Use IAM roles with minimal required permissions
+   - Use SSH keys instead of passwords
+   - Consider using AWS Systems Manager for more secure instance management
+3. The script creates a systemd service for automatic startup and management
+
+Would you like me to modify the script for any specific requirements or add additional features? For example, I could add:
+1. Support for AWS Systems Manager instead of direct SSH
+2. Additional configuration options for Cribl
+3. Support for different Linux distributions
+4. Backup of existing Cribl installation if present
