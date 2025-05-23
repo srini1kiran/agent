@@ -1,0 +1,137 @@
+
+
+
+Read file: add_vm_monitoring.ps1
+I see that the existing script is for Azure VM monitoring, but it's not related to Qualys agent installation. I'll help you create a new script to install the Qualys agent across multiple VMs. Here's a PowerShell script that you can use to install the Qualys agent on multiple VMs:
+
+```powershell
+# Script to install Qualys agent on multiple VMs
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$QualysActivationId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$QualysCustomerId,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VMListPath,  # Path to a text file containing VM names or IPs
+    
+    [Parameter(Mandatory=$false)]
+    [string]$Username,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$Password,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$QualysAgentPath = "C:\QualysAgent"  # Default installation path
+)
+
+# Function to install Qualys agent on a single VM
+function Install-QualysAgent {
+    param(
+        [string]$VMName,
+        [string]$ActivationId,
+        [string]$CustomerId,
+        [string]$InstallPath
+    )
+    
+    try {
+        # Create installation directory if it doesn't exist
+        New-Item -ItemType Directory -Force -Path $InstallPath
+        
+        # Download Qualys agent installer
+        $installerUrl = "https://qualysguard.qualys.com/Agent/QualysAgent.exe"
+        $installerPath = Join-Path $InstallPath "QualysAgent.exe"
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+        
+        # Install Qualys agent
+        $arguments = "/s /c `"$CustomerId`" /a `"$ActivationId`""
+        Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait
+        
+        Write-Host "Successfully installed Qualys agent on $VMName"
+        return $true
+    }
+    catch {
+        Write-Error "Failed to install Qualys agent on $VMName : $_"
+        return $false
+    }
+}
+
+# Main script execution
+try {
+    # Read VM list from file
+    $vmList = Get-Content $VMListPath
+    
+    foreach ($vm in $vmList) {
+        Write-Host "Processing VM: $vm"
+        
+        # Check if VM is reachable
+        if (Test-Connection -ComputerName $vm -Count 1 -Quiet) {
+            # Create PSSession if credentials are provided
+            if ($Username -and $Password) {
+                $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($Username, $securePassword)
+                $session = New-PSSession -ComputerName $vm -Credential $credential
+                
+                # Install agent remotely
+                Invoke-Command -Session $session -ScriptBlock {
+                    param($ActivationId, $CustomerId, $InstallPath)
+                    Install-QualysAgent -VMName $env:COMPUTERNAME -ActivationId $ActivationId -CustomerId $CustomerId -InstallPath $InstallPath
+                } -ArgumentList $QualysActivationId, $QualysCustomerId, $QualysAgentPath
+                
+                Remove-PSSession $session
+            }
+            else {
+                # Install agent locally
+                Install-QualysAgent -VMName $vm -ActivationId $QualysActivationId -CustomerId $QualysCustomerId -InstallPath $QualysAgentPath
+            }
+        }
+        else {
+            Write-Warning "VM $vm is not reachable"
+        }
+    }
+}
+catch {
+    Write-Error "An error occurred: $_"
+}
+```
+
+To use this script:
+
+1. Save it as `install_qualys_agent.ps1`
+
+2. Create a text file (e.g., `vm_list.txt`) containing the names or IP addresses of your VMs, one per line:
+```
+vm1.example.com
+vm2.example.com
+192.168.1.100
+```
+
+3. Run the script with the required parameters:
+```powershell
+.\install_qualys_agent.ps1 -QualysActivationId "YOUR_ACTIVATION_ID" -QualysCustomerId "YOUR_CUSTOMER_ID" -VMListPath "path\to\vm_list.txt"
+```
+
+Optional parameters:
+- `-Username`: Username for remote VM access
+- `-Password`: Password for remote VM access
+- `-QualysAgentPath`: Custom installation path (defaults to "C:\QualysAgent")
+
+Features of this script:
+1. Supports both local and remote installations
+2. Handles multiple VMs from a list
+3. Includes error handling and logging
+4. Verifies VM connectivity before attempting installation
+5. Supports custom installation paths
+6. Downloads the latest Qualys agent installer automatically
+
+Important notes:
+1. You'll need your Qualys Activation ID and Customer ID from your Qualys account
+2. The script requires PowerShell 5.1 or later
+3. For remote installations, ensure:
+   - WinRM is enabled on target VMs
+   - Firewall allows WinRM connections (default port 5985)
+   - User has administrative privileges
+4. The script assumes Windows VMs. For Linux VMs, you'll need a different installation approach
+
+Would you like me to modify the script for any specific requirements or add support for Linux VMs?
